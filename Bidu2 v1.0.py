@@ -1,0 +1,573 @@
+from ast import Assign
+from asyncio.windows_events import NULL
+import os
+import json
+from textwrap import wrap
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import logging
+from turtle import update
+
+try:
+    from ftrack_api import Session
+except ImportError:
+    print("Foi detectado que a API do ftrack não está instalada em seu sistema. Tentando instalar:")
+    os.system("python -m pip install ftrack-python-api")
+    from ftrack_api import Session
+
+try:
+    import requests
+except ImportError:
+    print("Foi detectado que o módulo 'requests' não está instalada em seu sistema. Tentando instalar:")
+    os.system("python -m pip install requests")
+    import requests
+
+from resources.typeHints import *
+
+
+class window():
+
+    def __init__(self) -> None:
+
+        self.window = tk.Tk()
+        self.window.title('ftrack Tasks')
+        self.window.geometry('400x500')
+
+        self.credential: str = ''
+        self.cretendialPath: str = ''
+        self.contentType: (str) = ''
+        self.selectedFolder: str = ''
+        self.selectedCredentialLabel = tk.StringVar()
+        self.selectedProjectLabel = tk.StringVar()
+        self.selectedContentLabel = tk.StringVar()
+        self.selectedShotGroupTypeLabel = tk.StringVar()
+        self.seletedNameLabel = tk.StringVar()
+
+        # Garante que o script esteja trabalhando na pasta onde o script se localiza
+        try:
+            scriptPath: str = os.path.dirname(os.path.realpath(__file__))
+            os.chdir(scriptPath)
+        except NameError:
+            pass
+
+
+        # separa o nome das credenciais disponíveis
+        self.availableCredentials: (dict[str, dict[str, str]]) = self.list_available_credentials()
+        self.credentialsName: list[str] = []
+        self.availableProjects: list[str] = []
+        self.availableContents: list[str] = []
+        self.availableNames: list[str] = []
+     
+
+        if self.availableCredentials == None:
+            messagebox.showwarning("Aviso!", "Nenhuma credencial disponível. Verifique se existe uma pasta junto do script "
+                "chamada 'resources', e dentro dela existe uma pasta de 'credentials' com alguma credencial dentro.\n"
+                "Qualquer dúvida, favor solicitar uma credencial ao setor de Produção ou de Pipeline")
+
+        else:
+            for cred in self.availableCredentials:
+                x: str = self.availableCredentials[cred]['display_name']
+                self.credentialsName.append(x)
+
+        self.main_Window = ttk.Frame(self.window)
+
+        self.main_topRow = ttk.Frame(self.main_Window)
+        self.main_body = ttk.Frame(self.main_Window)
+        self.main_bottomRow = ttk.Frame(self.main_Window, style='test.TFrame')
+        self.config_Window = ttk.Frame(self.window)
+        self.windows: list[ttk.Frame] = [self.main_Window, self.config_Window,]
+
+    
+
+        # # GERAÇÃO DA INTERFACE - TELA INICIAL -----------------------------------
+        self.credentialsLabel = ttk.Label(self.main_topRow, text='Credencial')
+        self.credentialsList = ttk.OptionMenu(self.main_topRow, self.selectedCredentialLabel, self.credentialsName[0], *self.credentialsName, command=self.on_credential_changed, style='credential.TMenubutton')
+        self.credentialsList.pack(side='right')
+        self.credentialsLabel.pack(side='right')
+
+
+        self.main_body.grid_columnconfigure(0, minsize=100)
+        self.main_body.grid_columnconfigure(1, minsize=200)
+
+        ttk.Label(self.main_body, text='Escolha o projeto e o episódio.', wraplength=350).grid(column=0, row=0, columnspan=2)
+
+        self.projectsListLabel = ttk.Label(self.main_body, text='Projeto')
+        self.projectsList = ttk.OptionMenu(self.main_body, self.selectedProjectLabel, 'Escolha um projeto', *self.availableProjects, command=self.on_project_changed, direction='right', style='main.TMenubutton')
+        self.projectsListLabel.grid(row=2, column=0, sticky='e')
+        self.projectsList.grid(row=2, column=1, ipadx=10, ipady=5, sticky='w', pady=5)
+
+        self.contentListLabel = ttk.Label(self.main_body, text='Conteúdo')
+        self.contentList = ttk.OptionMenu(self.main_body, self.selectedContentLabel, 'Escolha um conteúdo', *self.availableContents, command=lambda selection: self.on_content_changed(selection), direction='right', style='main.TMenubutton')
+        self.contentListLabel.grid(row=3, column=0, sticky='e')
+        self.contentList.grid(row=3, column=1, ipadx=10, ipady=5, sticky='w', pady=5)
+
+        ttk.Separator(self.main_body, orient='horizontal').grid(row=5, column=0, columnspan=2, sticky='ew', pady=10)
+
+        self.main_topRow.pack(anchor='e', padx=10, side='top')
+        ttk.Separator(self.main_Window, orient='horizontal').pack(fill='x', anchor='w', pady=5)
+        self.main_bottomRow.pack(side='bottom')
+        ttk.Separator(self.main_Window, orient='horizontal').pack(fill='x', anchor='w', side='bottom',)
+        self.main_body.pack(fill='both', side='bottom', expand=True)
+
+        self.main_Window.pack(fill='y', expand=True)
+
+
+
+        # # GERAÇÃO DA INTERFACE - TELA DE CONFIGURAÇÕES -----------------------------------
+
+        ## Configurações de download -----------------------------------
+        downloadTypeFrame = ttk.LabelFrame(self.config_Window, text='O que você quer que seja baixado?')
+
+        self.downloadType_var = tk.StringVar()
+        self.downloadType_var.set('type_dependent')
+
+        ttk.Radiobutton(downloadTypeFrame, text='Os uploads mais recentes de cada tipo de task',
+                        variable=self.downloadType_var, value='type_dependent',
+                        command = lambda: self.checkbox_set_state('enabled', CB_dict=self.cb_shotsDict),
+                        ).pack(anchor='w')
+        ttk.Radiobutton(downloadTypeFrame, text='Só o único upload mais recente do shot',
+                        variable=self.downloadType_var, value='only_most_recent',
+                        command = lambda: self.checkbox_set_state('disabled', CB_dict=self.cb_shotsDict),
+                        ).pack(anchor='w')
+
+        downloadTypeFrame.pack(pady=10, anchor='w', fill='x')
+
+
+        ## Escolha de tipos de task pra baixar -----------------------------------
+        self.taskTypeFrame = ttk.LabelFrame(self.config_Window, text='Tipos de tarefas')
+        self.taskTypeFrame.pack(pady=10, anchor='w', fill='x')
+
+        shotButtonsFrame = ttk.Frame(self.taskTypeFrame)
+        shotButtonsFrame.grid(row=100, column=0)
+
+        ttk.Button(shotButtonsFrame, text='Selecionar tudo',
+                    command = lambda: self.checkbox_set_all(True, CB_dict=self.cb_shotsDict)
+                    ).grid(column=0, row=101)
+        ttk.Button(shotButtonsFrame, text='Deselecionar tudo',
+                    command = lambda: self.checkbox_set_all(False, CB_dict=self.cb_shotsDict)
+                    ).grid(column=1, row=101)
+        # ttk.Button(shotButtonsFrame, text='Get values',
+        #             command= lambda: self.checkbox_get_values(CB_dict=self.cb_shotsDict)
+        #             ).grid(column=0, row=102, columnspan=2)
+
+
+        otherOptionsFrame = ttk.LabelFrame(self.config_Window, text='Configurações dos vídeos baixados')
+        otherOptionsFrame.pack(pady=10, anchor='w', fill='x')
+      
+        
+
+        # Personalização de tema pra Debug
+        style = ttk.Style()
+        # style.configure('TLabel', background='#b5ffbb')
+        style.configure('TMenubutton', background='#cad4df')
+        style.configure('main.TMenubutton', width=30)
+
+    def populate_task_types_cb(self) -> None:
+        if self.taskTypes:
+
+            try:
+                if self.cb_shotsDict:
+                    for checkbox in self.cb_shotsDict.keys():
+                        self.cb_shotsDict[checkbox]['obj'].destroy()
+            except AttributeError:
+                pass
+
+            self.cb_shotsDict = {}
+
+            for index, task in enumerate(self.taskTypes):
+                self.cb_shotsDict[task] = {
+                    'check': tk.BooleanVar(),
+                    'name': task,
+                    'state': 'enabled',
+                }
+                self.cb_shotsDict[task]['obj'] = ttk.Checkbutton(self.taskTypeFrame, text=self.cb_shotsDict[task]['name'],
+                                                                 variable=self.cb_shotsDict[task]['check'],
+                                                                 state=self.cb_shotsDict[task]['state'],
+                                                                 command=lambda: self.checkbox_get_values(CB_dict=self.cb_shotsDict))
+                self.cb_shotsDict[task]['obj'].grid(row=index, sticky='w')
+
+        else:
+            try:
+                if self.cb_shotsDict:
+                    for checkbox in self.cb_shotsDict.keys():
+                        self.cb_shotsDict[checkbox]['obj'].destroy()
+            except AttributeError:
+                pass
+
+
+
+    def get_current_credential_selected(self, selection) -> (dict[str, str]):
+
+        if self.availableCredentials == None:
+            messagebox.showwarning("Aviso!", "Nenhuma credencial selecionada. Verifique se existe uma pasta junto do script "\
+                "chamada 'resources', e dentro dela existe uma pasta de 'credentials' com alguma credencial dentro.")
+            return
+
+        for key in self.availableCredentials:
+            for item in self.availableCredentials[key]:
+                if self.availableCredentials[key]['display_name'] == selection:
+                    selectedItem: dict[str, str] = self.availableCredentials[key]
+                    return selectedItem
+
+
+    def get_current_project_selected(self, selection) -> (dict[str, str]):
+        for key in self.projectsDict:
+            for item in self.projectsDict[key]:
+                if self.projectsDict[key]['name'] == selection:
+                    selectedItem: dict[str, str] = self.projectsDict[key]
+                    return selectedItem
+
+    def on_content_changed(self, selection) -> None:
+        self.selectedContent: str = selection
+        self.taskTypes: (set[str]) = set()
+        print(self.selectedContent)
+
+        try:
+            shotQuery = self.session.query(
+                f'select name, descendants.type.name from Shot where project.full_name is "{self.selectedProjectName}" '
+                f'and parent.name is {self.selectedContent}'
+            ).all()
+            if shotQuery:
+                shots: list[str] = [x['name'] for x in shotQuery]
+                taskTypes: set[str] = set()
+                for item in shotQuery:
+                    for child in item['descendants']:
+                        try:
+                            taskTypes.add(child['type']['name'])
+                        except TypeError:
+                            messagebox.showwarning("Atenção", f"Atenção! o Shot {item['name']} não possui tasks. O script vai pular esse shot.")
+                print(f'Foram encontrados {len(taskTypes)} tipos de tarefa.')
+
+                self.taskTypes: (set[str] ) = taskTypes
+                self.shots: list[str] = shots
+                self.shots.sort()
+                
+       
+
+            else:
+                self.taskTypes = None
+                messagebox.showwarning("Atenção", f"Atenção! Este {self.contentType} não possui shots ou está fora do padrão necessário. Os shots precisam estar dentro dos {self.contentType}s no ftrack, sem nenhuma pasta intermediária.")
+
+        except ServerError:
+            messagebox.showwarning(
+                "Atenção", "O episódio ou a sequência selecionada não possui nenhum shot, ou possui um shot sem nenhuma task dentro.\n"
+                "Atualmente este programa consegue baixar apenas os uploads feitos diretamente nos shots.\n\n"
+                "Se você não esperava encontrar este aviso neste momento, entre em contato com a coordenação ou o setor de pipeline para ver se é possível fazer algo sobre isso")
+
+
+        self.populate_task_types_cb()
+        #self.update_users_list()
+        self.get_Who_Assign()
+
+
+    def list_available_credentials(self) -> (dict[str, dict[str, str]]):
+        credentialsDict: dict[str, dict[str, str]] = {}
+
+        if os.path.exists('./resources/credentials/'):
+            credentialsPath: str = os.path.join(os.path.abspath('.'), 'resources/credentials/')
+            credentialsPath: str = credentialsPath.replace('\\', '/')
+            credentialsList: list[str] = [x for x in os.listdir(credentialsPath) if x.startswith('credentials-')]
+
+            self.cretendialPath = credentialsPath
+
+            for credential in credentialsList:
+                credentialsDict[credential] = {
+                    'file_name': credential,
+                    'file_path': credentialsPath + credential,
+                    'display_name': str(credential).replace('_', ' ').removeprefix('credentials-').removesuffix('.json'),
+                    }
+
+        if credentialsDict:
+            return credentialsDict
+
+        else:
+            print('ERRO: Não foi encontrada a pasta de credenciais')
+
+
+    def on_credential_changed(self, selection) -> None:
+
+        self.projectsList.set_menu('--- carregando projetos ---', [])
+        self.projectsList.update()
+
+
+        selectedCredential: (dict[str, str]) = self.get_current_credential_selected(selection)
+
+        if selectedCredential == None:
+            messagebox.showwarning("Aviso!", "Nenhuma credencial selecionada.")
+            return
+
+        print("Credencial selecionada: " + selectedCredential['display_name'])
+
+        with open(self.cretendialPath + selectedCredential['file_name'], 'r') as f:
+            data = json.load(f)
+
+        self.session = Session(
+            server_url ="https://hype.ftrackapp.com",
+            api_key = data["key"],
+            api_user = data["user"]
+        )
+
+        self.serverLocation: Location = self.session.query(
+                'Location where name is "ftrack.server"').one()
+
+        self.update_project_list()
+
+        print(f'Foram encontrados {len(self.availableProjects)} projetos.')
+     
+
+        if len(self.availableProjects) == 0:
+            messagebox.showwarning("Atenção","Nenhum projeto foi encontrado!")
+
+
+
+    def on_project_changed(self, selection) -> None:
+
+        self.selectedProject: (dict[str, str]) = self.get_current_project_selected(selection)
+
+        if self.selectedProject == None:
+            messagebox.showwarning("Aviso", "Nenhum projeto selecionado!")
+            return
+
+        self.selectedProjectName: str = self.selectedProject['name']
+
+        print(f'Projeto selecionado: {self.selectedProject["name"]}')
+       
+        self.projectType: str = str(self.selectedProject['type'])
+
+        self.contentType: (str ) = self.get_content_type(self.projectType)
+        if self.contentType == None:
+            messagebox.showwarning("Aviso", "Nenhum tipo de conteúdo selecionado!")
+            return
+        # print(f'Project Type: {self.projectType},\t Content type: {self.contentType}')
+
+        if self.contentType == 'Episode' or self.contentType == 'Sequence':
+            contentQuery: list[QueryResult] = self.session.query(
+                f'''select name from {self.contentType} \
+                    where project.full_name is "{self.selectedProjectName}"'''
+            ).all()
+
+            if contentQuery:
+                self.contentList.configure(state='normal')
+                contentList: list[str] = list({item['name'] for item in contentQuery})
+                contentList.sort()
+                self.availableContents = contentList
+
+                print(f'Foram encontrados {len(self.availableContents)} {self.contentType}s.')
+                
+                self.contentList.set_menu(*self.availableContents)
+                self.contentListLabel.configure(text=f'{self.contentType}:')
+
+            else:
+                messagebox.showwarning("Atenção", f"Nenhum(a) {self.contentType} foi encontrado!\nSe o projeto for longa, verifique se ele possui sequências.\nSe for série, precisa ter episódios.")
+                self.contentList.configure(state='disabled')
+                self.contentList.set_menu(f'Projeto é {self.projectType.capitalize()} mas\nnão tem {self.contentType}s')
+
+        elif self.contentType == 'Shot':
+            self.contentList.configure(state='disabled')
+            self.contentList.set_menu('Shots (todos os shots)')
+
+        else:
+            self.contentList.configure(state='disabled')
+            self.contentList.set_menu(f'Projeto precisa ser Curta, Longa\nou Série, mas é {self.projectType.capitalize()}')
+        
+        
+        
+       
+    def get_content_type(self, projectType: str) -> (str):
+        if projectType == 'series':
+            return 'Episode'
+
+        if projectType == 'project':
+            return 'project'
+
+        if projectType == 'feature':
+            return 'Sequence'       
+        
+        if projectType == 'short':
+            return 'Shot'       
+
+
+    def get_project_type(self, code: str) -> str:
+        if code.startswith('sr'):
+            return 'series'
+        if code.startswith('fm'):
+            return 'feature'
+        if code.startswith('sm'):
+            return 'short'
+        if code.startswith('gm'):
+            return 'game'
+        if code.startswith('ot'):
+            return 'other'
+
+        return f'unknown -> {code}'
+
+
+    def update_project_list(self) -> None:
+
+        projects: list[QueryResult] = self.session.query(
+            'select full_name, name, id, custom_attributes from Project where status is "Active" '
+            ).all()
+
+        availableProjectsDict: dict[str, dict[str,str] ] = {}
+        availableProjectNamesList: list[str] = []
+
+        for result in projects:
+            project: dict[str, str] = {
+                'name': result['full_name'],
+                'code': result['name'],
+                'initials': result['custom_attributes']['initials'],
+                'id': result['id'],
+                'type': self.get_project_type(result['name']),
+            }
+            availableProjectsDict[project['name']] = project
+            availableProjectNamesList.append(project['name'])
+
+        self.availableProjects: list[str] = sorted(availableProjectNamesList)
+        self.projectsDict: dict[str, dict[str, str]] = availableProjectsDict
+        self.projectsList.set_menu('Selecione um projeto', *self.availableProjects)
+     
+
+
+    def update_users_list(self)-> None:
+        
+        users: list[QueryResult]= self.session.query('User').all()
+        availableUsersDict: dict[str, dict[str,str] ] = {}
+        availableUsersList: list[str] = []
+      
+        
+        for i in users:
+            if i['first_name']== 'Lais':
+                print(i['first_name'], i['last_name'])
+            user: dict[str, str] = {
+                'name': i['first_name']+ i['last_name']
+            }
+            availableUsersDict[user['name']] = user
+            availableUsersList.append(user['name'])
+           
+        self.availableNames: list[str] = sorted(availableUsersList)
+        self.usersDict: dict[str, dict[str, str]] = availableUsersDict
+        self.nameList.set_menu('Selecionar um nome, ' * self.availableNames)
+       
+  
+
+    def get_file_name(self) -> (str):
+
+        if self.is_replaceUploadName.get() == False:
+            name: str = self.currentUplodadName + self.currentFileExtension
+            return name
+
+        if self.selectedProject == None:
+            messagebox.showwarning("Aviso", "Nenhum projeto selecionado.")
+            return
+
+        projectInitial: str = self.selectedProject['initials']
+        content: str = self.selectedContent
+
+        if projectInitial.lower() in content.lower():
+            projectInitial: str = ''
+        else:
+            projectInitial: str = self.selectedProject['initials']
+
+        shot: str = self.currentShot
+
+        if content.lower() in shot.lower():
+            content: str = ''
+        else:
+            content: str = "_" + self.selectedContent
+
+        if self.is_removeVersionFromName.get() is True:
+            version: str = ''
+        else:
+            version: str = '_v' + str(self.currentUploadVersion).zfill(2)
+
+        if self.currentTaskType:
+            task: str = '_' + self.currentTaskType.lower()
+        else:
+            task: str = ''
+
+        extension: str = self.currentFileExtension
+
+        return projectInitial + content + shot + task + version + extension
+
+
+    def get_folder_name(self) -> str:
+        basePath: str = self.base_folder
+        content: str = self.selectedContent
+        shot: str = self.currentShot
+
+        if self.is_groupByShot.get() is False:
+            shot: str = ''
+
+        return os.path.join(basePath, content, shot)
+
+
+    def go_to(self, *panels) -> None:
+        for window in self.windows:
+            window.pack_forget()
+            window.grid_forget()
+        for panel in panels:
+            panel.pack(expand=True, fill='y')
+
+
+    def show(self) -> None:
+        self.window.mainloop()
+
+    
+
+    def get_state_name(self, task):
+        '''Return the short name of *task*'s state, if valid, othertwise None.'''
+        logger = logging.getLogger('com.ftrack.recipes.cascade_status_change')
+        try:
+            state = task['status']['state']['short']
+        except KeyError:
+            logger.info(
+                'Child {} has no status'.format(self.session.inspection.identity(task))
+            )
+            return
+        if state not in ('BLOCKED', 'DONE', 'IN_PROGRESS', 'NOT_STARTED'):
+            logger.warning('Unknown state returned: {}'.format(state))
+            return
+        return state
+
+
+    def get_Who_Assign(self):   
+
+        print("entrei no get_who")
+        task= self.session.query('select name, id from Task').all()
+        assign= ''
+
+        if os.path.exists('./user.json'):
+            print ("json usuario encontrado")
+            with open("user.json","r") as openfile:
+                json_object = json.load(openfile)
+
+        for i in task:
+            users = self.session.query('select first_name, last_name from User '
+            'where assignments any (context_id = "{0}")'.format(i['id']))
+            for user in users:
+                assign= user['first_name']+ " " + user['last_name'] +", Type: "+ i['name'] + ", Status: "+ self.get_state_name(i)
+                print (assign)
+            '''
+            if (os.path.exists('./user.json') == False):
+                print("nao encontrei usuario, criei novo")
+                dic={
+                "first_name": user['first_name'],
+                "last_name": user['last_name']}
+      
+                json_object=json.dumps(dic, indent=2)
+
+                with open("user.json","w") as outfile:
+                    outfile.write(json_object)
+
+            if (user['first_name'],user['last_name'])  == (json_object.get('first_name'),json_object.get('last_name')):
+                print("Tasks: ")
+                print (assign)
+
+            else:
+                print("Não possui tasks deste usuário")'''
+
+x = window()
+x.on_credential_changed(x.credentialsName[0])
+x.update_project_list()
+x.show()
+
